@@ -1,0 +1,112 @@
+---
+- name: Configure system-wide proxy on reachable RHEL 9.x clients
+  hosts: all
+  become: yes
+  gather_facts: no
+
+  vars:
+    proxy_ip: "10.0.14.117"
+    proxy_port: "3128"
+    http_proxy: "http://10.0.14.117:3128"
+    https_proxy: "http://10.0.14.117:3128"
+    no_proxy: "127.0.0.1,localhost,10.0.0.0/8,172.16.0.0/12,.svc,.cluster.local,dc-test-10xpay-ctl-lb.itcbd.com"
+
+  tasks:
+    - name: Check if the client itself is alive (ping test)
+      ansible.builtin.ping:
+      register: ping_result
+      ignore_unreachable: true
+      ignore_errors: true
+
+    - name: End play for this host if it is not reachable
+      meta: end_host
+      when: ping_result is failed or ping_result.ping is not defined
+
+    - name: Ensure proxy settings persist for DNF
+      lineinfile:
+        path: /etc/dnf/dnf.conf
+        insertafter: '^\\[main\\]'
+        line: '{{ item }}'
+      loop:
+        - "proxy={{ http_proxy }}"
+
+    - name: Set environment variables in /etc/environment
+      lineinfile:
+        path: /etc/environment
+        create: yes
+        line: '{{ item }}'
+        insertafter: EOF
+      loop:
+        - "http_proxy={{ http_proxy }}"
+        - "https_proxy={{ https_proxy }}"
+        - "no_proxy={{ no_proxy }}"
+
+    - name: Set environment variables in ~/.bashrc
+      lineinfile:
+        path: ~/.bashrc
+        create: yes
+        line: '{{ item }}'
+        insertafter: EOF
+      loop:
+        - "export http_proxy={{ http_proxy }}"
+        - "export https_proxy={{ https_proxy }}"
+        - "export no_proxy={{ no_proxy }}"
+
+    - name: Configure proxy for all users in /etc/profile.d/proxy.sh
+      copy:
+        dest: /etc/profile.d/proxy.sh
+        mode: '0644'
+        content: |
+          export http_proxy="{{ http_proxy }}"
+          export https_proxy="{{ https_proxy }}"
+          export no_proxy="{{ no_proxy }}"          
+
+    - name: Create containerd systemd drop-in directory
+      file:
+        path: /etc/systemd/system/containerd.service.d
+        state: directory
+        mode: '0755'
+
+    - name: Configure containerd HTTP proxy
+      copy:
+        dest: /etc/systemd/system/containerd.service.d/http-proxy.conf
+        mode: '0644'
+        content: |
+          [Service]
+          Environment="HTTP_PROXY={{ http_proxy }}"
+          Environment="HTTPS_PROXY={{ https_proxy }}"
+          Environment="NO_PROXY={{ no_proxy }}"
+
+    - name: Create kubelet systemd drop-in directory
+      file:
+        path: /etc/systemd/system/kubelet.service.d
+        state: directory
+        mode: '0755'
+
+    - name: Configure kubelet HTTP proxy
+      copy:
+        dest: /etc/systemd/system/kubelet.service.d/10-proxy.conf
+        mode: '0644'
+        content: |
+          [Service]
+          Environment="HTTP_PROXY={{ http_proxy }}"
+          Environment="HTTPS_PROXY={{ https_proxy }}"
+          Environment="NO_PROXY={{ no_proxy }}"
+
+    - name: Reload systemd daemon
+      command: systemctl daemon-reexec
+
+    - name: Reload systemd configuration
+      command: systemctl daemon-reload
+
+    - name: Restart containerd
+      systemd:
+        name: containerd
+        state: restarted
+        enabled: yes
+
+    - name: Restart kubelet
+      systemd:
+        name: kubelet
+        state: restarted
+        enabled: yes
