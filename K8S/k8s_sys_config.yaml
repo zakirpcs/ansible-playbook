@@ -1,0 +1,99 @@
+---
+- name: Configure system for Kubernetes
+  hosts: all
+  become: true
+  gather_facts: no
+
+  tasks:
+    - name: Check if the client itself is alive (ping test)
+      ansible.builtin.ping:
+      register: ping_result
+      ignore_unreachable: true
+      ignore_errors: true
+
+    - name: End play for this host if it is not reachable
+      meta: end_host
+      when: ping_result is failed or ping_result.ping is not defined
+
+    - name: Disable swap immediately
+      command: swapoff -a
+
+    - name: Remove swap entry from /etc/fstab
+      replace:
+        path: /etc/fstab
+        regexp: '^.*swap.*$'
+        replace: ''
+        backup: yes
+
+    - name: Ensure k8s kernel modules are configured
+      copy:
+        dest: /etc/modules-load.d/k8s.conf
+        content: |
+          br_netfilter
+          overlay
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Load overlay module
+      modprobe:
+        name: overlay
+        state: present
+
+    - name: Load br_netfilter module
+      modprobe:
+        name: br_netfilter
+        state: present
+
+    - name: Configure sysctl for Kubernetes
+      copy:
+        dest: /etc/sysctl.d/k8s.conf
+        content: |
+          net.bridge.bridge-nf-call-ip6tables = 1
+          net.bridge.bridge-nf-call-iptables = 1
+          net.ipv4.ip_forward = 1
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Apply sysctl settings
+      command: sysctl --system
+
+    - name: Configure YUM repository for Conatinerd
+      copy:
+        dest: /etc/yum.repos.d/containerd.repo
+        content: |
+         [containerd]
+         name=containerd stable repo
+         #baseurl=https://download.docker.com/linux/centos/9/\$basearch/stable
+         baseurl=https://download.docker.com/linux/centos/$releasever/$basearch/stable
+         enabled=1
+         gpgcheck=1
+         gpgkey=https://download.docker.com/linux/centos/gpg
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Configure YUM repository for Kubernetes
+      copy:
+        dest: /etc/yum.repos.d/kubernetes.repo
+        content: |
+         [kubernetes]
+         name=Kubernetes
+         baseurl=https://pkgs.k8s.io/core:/stable:/v1.32/rpm/
+         enabled=1
+         gpgcheck=1
+         gpgkey=https://pkgs.k8s.io/core:/stable:/v1.32/rpm/repodata/repomd.xml.key
+         #exclude=kubelet kubeadm kubectl
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Install Kubernetes required packages using YUM repository
+      dnf:
+        name: 
+          - containerd.io
+          - kubelet 
+          - kubeadm 
+          - kubectl
+        state: present
